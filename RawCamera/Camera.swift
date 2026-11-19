@@ -430,11 +430,11 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         }
     }
 
-    func orient(_ orientation: UIDeviceOrientation) {
+    func orient(_ orientation: UIInterfaceOrientation) {
         queue.async {
             switch orientation {
-            case .landscapeLeft: self.rotation = 0
-            case .landscapeRight: self.rotation = 180
+            case .landscapeLeft: self.rotation = 180
+            case .landscapeRight: self.rotation = 0
             case .portrait: self.rotation = 90
             case .portraitUpsideDown: self.rotation = 270
             default: break

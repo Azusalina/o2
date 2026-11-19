@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import CoreMotion
 import SwiftUI
 
 @main
@@ -10,19 +11,99 @@ struct RawCameraApp: App {
     }
 }
 
+private enum GridMode: String, CaseIterable {
+    case off = "Off"
+    case thirds = "Rule of Thirds"
+    case golden = "Golden Ratio"
+
+    var divisions: [CGFloat] {
+        switch self {
+        case .off: return []
+        case .thirds: return [1.0 / 3, 2.0 / 3]
+        case .golden: return [0.38196601125, 0.61803398875]
+        }
+    }
+}
+
+private final class MotionLevel: ObservableObject {
+    @Published private var gravity: CMAcceleration?
+    private let motion = CMMotionManager()
+
+    func setActive(_ active: Bool) {
+        guard active, motion.isDeviceMotionAvailable else {
+            motion.stopDeviceMotionUpdates()
+            gravity = nil
+            return
+        }
+        guard !motion.isDeviceMotionActive else { return }
+        motion.deviceMotionUpdateInterval = 1.0 / 20
+        motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+            self?.gravity = data?.gravity
+        }
+    }
+
+    func roll(for orientation: UIInterfaceOrientation) -> Double? {
+        guard let gravity, hypot(gravity.x, gravity.y) > 0.2 else { return nil }
+        let reference: Double
+        switch orientation {
+        case .landscapeLeft: reference = .pi / 2
+        case .landscapeRight: reference = -.pi / 2
+        case .portraitUpsideDown: reference = .pi
+        default: reference = 0
+        }
+        let angle = atan2(gravity.x, -gravity.y) - reference
+        return atan2(sin(angle), cos(angle))
+    }
+}
+
+private struct LevelDisplay: View {
+    let roll: Double?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Rectangle().fill(.white.opacity(0.6)).frame(width: 100, height: 1)
+                if let roll {
+                    Rectangle()
+                        .fill(abs(roll) < .pi / 180 ? Color.yellow : Color.white)
+                        .frame(width: 72, height: 3)
+                        .rotationEffect(.radians(-roll))
+                }
+            }
+            .frame(width: 108, height: 40)
+            Text(roll.map { String(format: "%.1f°", abs($0) * 180 / .pi) } ?? "Level unavailable")
+                .font(.caption.monospacedDigit())
+                .padding(4)
+                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Camera level")
+        .accessibilityValue(roll.map { String(format: "%.1f degrees", abs($0) * 180 / .pi) } ?? "Unavailable. Hold the phone upright.")
+    }
+}
+
 private final class PreviewView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
     var onFocus: ((CGPoint) -> Void)?
     var focusEnabled = false
+    var grid = GridMode.off
+    var onOrientation: ((UIInterfaceOrientation) -> Void)?
+    private var orientation = UIInterfaceOrientation.unknown
+    private let gridLayer = CAShapeLayer()
     private let focusRing = CALayer()
-    private var focusPoint = CGPoint(x: 0.5, y: 0.5)
+    var focusPoint = CGPoint(x: 0.5, y: 0.5)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
         focusRing.borderWidth = 1.5
         focusRing.borderColor = UIColor.systemYellow.cgColor
+        gridLayer.strokeColor = UIColor.white.withAlphaComponent(0.55).cgColor
+        gridLayer.lineWidth = 0.75
+        gridLayer.fillColor = nil
+        layer.addSublayer(gridLayer)
         layer.addSublayer(focusRing)
     }
 
@@ -30,6 +111,37 @@ private final class PreviewView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if let current = window?.windowScene?.interfaceOrientation, current != .unknown {
+            let angle: CGFloat
+            switch current {
+            case .landscapeLeft: angle = 180
+            case .landscapeRight: angle = 0
+            case .portraitUpsideDown: angle = 270
+            default: angle = 90
+            }
+            if let connection = preview.connection, connection.isVideoRotationAngleSupported(angle),
+               connection.videoRotationAngle != angle {
+                connection.videoRotationAngle = angle
+            }
+            if orientation != current {
+                orientation = current
+                // Publish after UIKit finishes this layout pass.
+                DispatchQueue.main.async { [weak self] in self?.onOrientation?(current) }
+            }
+        }
+        let imageRect = preview.layerRectConverted(fromMetadataOutputRect: CGRect(x: 0, y: 0, width: 1, height: 1)).intersection(bounds)
+        let path = UIBezierPath()
+        if !imageRect.isNull {
+            for fraction in grid.divisions {
+                let x = imageRect.minX + imageRect.width * fraction
+                let y = imageRect.minY + imageRect.height * fraction
+                path.move(to: CGPoint(x: x, y: imageRect.minY))
+                path.addLine(to: CGPoint(x: x, y: imageRect.maxY))
+                path.move(to: CGPoint(x: imageRect.minX, y: y))
+                path.addLine(to: CGPoint(x: imageRect.maxX, y: y))
+            }
+        }
+        gridLayer.path = path.cgPath
         positionFocusRing()
     }
 
@@ -55,6 +167,9 @@ private final class PreviewView: UIView {
 private struct Preview: UIViewRepresentable {
     let camera: Camera
     let focusEnabled: Bool
+    let grid: GridMode
+    @Binding var focusPoint: CGPoint
+    @Binding var orientation: UIInterfaceOrientation
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.preview.videoGravity = .resizeAspect
@@ -63,9 +178,15 @@ private struct Preview: UIViewRepresentable {
     }
     func updateUIView(_ view: PreviewView, context: Context) {
         view.focusEnabled = focusEnabled
-        view.onFocus = { camera.focus(at: $0) }
-        if let connection = view.preview.connection, connection.isVideoRotationAngleSupported(90), connection.videoRotationAngle != 90 {
-            connection.videoRotationAngle = 90
+        view.grid = grid
+        view.focusPoint = focusPoint
+        view.onFocus = {
+            focusPoint = $0
+            camera.focus(at: $0)
+        }
+        view.onOrientation = {
+            orientation = $0
+            camera.orient($0)
         }
         view.setNeedsLayout()
     }
@@ -129,9 +250,9 @@ private struct ExposureHistogram: View {
     let live: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(live ? "Exposure · preview" : "Exposure · paused")
-                .font(.caption2)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(live ? "Exposure" : "Paused")
+                .font(.system(size: 9))
             Canvas { context, size in
                 guard !bins.isEmpty else { return }
                 let width = size.width / CGFloat(bins.count)
@@ -142,15 +263,9 @@ private struct ExposureHistogram: View {
                 }
                 context.fill(bars, with: .color(.white.opacity(live ? 0.9 : 0.4)))
             }
-            .frame(width: 144, height: 52)
-            HStack {
-                Text("Shadows")
-                Spacer()
-                Text("Highlights")
-            }
-            .font(.system(size: 9))
+            .frame(width: 92, height: 30)
         }
-        .padding(8)
+        .padding(6)
         .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 6))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Exposure histogram, shadows on the left and highlights on the right")
@@ -163,67 +278,31 @@ private struct Viewfinder: View {
     @ObservedObject var camera: Camera
     @Environment(\.scenePhase) private var phase
     @State private var tab = Adjustment.exposure
+    @State private var focusPoint = CGPoint(x: 0.5, y: 0.5)
+    @State private var orientation = UIInterfaceOrientation.portrait
+    @StateObject private var level = MotionLevel()
+    @AppStorage("viewfinderGrid") private var gridSelection = GridMode.off.rawValue
+    @AppStorage("viewfinderLevel") private var showLevel = false
     private var p: Panel { camera.panel }
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text(p.lenses.first(where: { $0.id == p.lens })?.name ?? "Lens")
-                    .font(.subheadline)
-                Spacer()
-                Text("DNG").font(.caption.bold())
-            }
-            .opacity(camera.cameraControlFullscreen ? 0 : 1)
-            ZStack(alignment: .bottom) {
-                Preview(camera: camera, focusEnabled: p.ready && !p.busy && p.canTapFocus)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityHidden(true)
-                HStack(spacing: 12) {
-                    ForEach(p.lenses) { lens in
-                        Button { camera.select(lens.id) } label: {
-                            Text(lens.magnification)
-                                .font(.subheadline.bold().monospacedDigit())
-                                .foregroundStyle(lens.id == p.lens ? .yellow : .white)
-                                .frame(minWidth: 44, minHeight: 44)
-                                .background(.black.opacity(0.7), in: Circle())
-                                .overlay(Circle().stroke(lens.id == p.lens ? Color.yellow : Color.clear))
-                        }
-                        .accessibilityLabel(lens.name)
-                        .accessibilityValue(lens.id == p.lens ? "Selected" : "")
+        GeometryReader { geometry in
+            if geometry.size.width > geometry.size.height {
+                HStack(spacing: 16) {
+                    viewfinder
+                    VStack(spacing: 10) {
+                        navigation
+                        ScrollView { captureControls }
                     }
+                    .frame(width: min(280, geometry.size.width * 0.36))
                 }
-                .disabled(p.busy)
-                .opacity(camera.cameraControlFullscreen ? 0 : 1)
-                .padding(.bottom, 12)
-            }
-            .overlay(alignment: .topLeading) {
-                ExposureHistogram(bins: camera.histogram, live: p.ready)
-                    .padding(8)
-                    .opacity(camera.cameraControlFullscreen ? 0 : 1)
-            }
-            Group {
-                HStack {
-                    Text(p.burst ? (p.used == 30 ? "Buffer full · AF-C" : "Burst · AF-C") : "Buffer")
-                    Text("\(p.used)/30")
-                    Spacer()
-                    Text("\(p.saved) saved")
+            } else {
+                VStack(spacing: 10) {
+                    navigation
+                    viewfinder
+                    captureControls
                 }
-                .font(.caption.monospacedDigit())
-                if !p.message.isEmpty {
-                    Text(p.message).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if p.saveFailed { Button("Retry saving", action: camera.retry) }
-                Picker("Adjustment", selection: $tab) {
-                    ForEach(Adjustment.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented)
-                controls
-                    .disabled(!p.ready || p.busy)
-                Shutter(camera: camera, enabled: p.ready && !p.saveFailed, burst: p.burst)
-                    .frame(width: 66, height: 66)
-                Text("Tap for one photo · Hold for burst").font(.caption)
             }
-            .opacity(camera.cameraControlFullscreen ? 0 : 1)
-            .allowsHitTesting(!camera.cameraControlFullscreen)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -239,18 +318,101 @@ private struct Viewfinder: View {
             @unknown default: camera.up(cancel: true)
             }
         }
-        .onAppear {
-            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-            camera.orient(UIDevice.current.orientation)
+        .onChange(of: phase, initial: true) { _, value in
+            camera.setActive(value == .active)
+            level.setActive(showLevel && value == .active)
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-            camera.orient(UIDevice.current.orientation)
+        .onChange(of: showLevel) { _, enabled in
+            level.setActive(enabled && phase == .active)
         }
-        .onChange(of: phase, initial: true) { _, value in camera.setActive(value == .active) }
         .onDisappear {
-            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            level.setActive(false)
             camera.setActive(false)
         }
+    }
+
+    private var navigation: some View {
+        HStack {
+            Text(p.lenses.first(where: { $0.id == p.lens })?.name ?? "Lens")
+                .font(.subheadline)
+                .lineLimit(1)
+            Spacer()
+            Text("DNG").font(.caption.bold())
+            Menu {
+                Picker("Grid", selection: $gridSelection) {
+                    ForEach(GridMode.allCases, id: \.rawValue) { grid in
+                        Text(grid.rawValue).tag(grid.rawValue)
+                    }
+                }
+                Toggle("Level", isOn: $showLevel)
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .accessibilityLabel("Viewfinder options")
+        }
+        .opacity(camera.cameraControlFullscreen ? 0 : 1)
+    }
+
+    private var viewfinder: some View {
+        ZStack(alignment: .bottom) {
+            Preview(camera: camera, focusEnabled: p.ready && !p.busy && p.canTapFocus, grid: GridMode(rawValue: gridSelection) ?? .off, focusPoint: $focusPoint, orientation: $orientation)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityHidden(true)
+            HStack(spacing: 12) {
+                ForEach(p.lenses) { lens in
+                    Button { camera.select(lens.id) } label: {
+                        Text(lens.magnification)
+                            .font(.subheadline.bold().monospacedDigit())
+                            .foregroundStyle(lens.id == p.lens ? .yellow : .white)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .background(.black.opacity(0.7), in: Circle())
+                            .overlay(Circle().stroke(lens.id == p.lens ? Color.yellow : Color.clear))
+                    }
+                    .accessibilityLabel(lens.name)
+                    .accessibilityValue(lens.id == p.lens ? "Selected" : "")
+                }
+            }
+            .disabled(p.busy)
+            .opacity(camera.cameraControlFullscreen ? 0 : 1)
+            .padding(.bottom, 12)
+        }
+        .overlay(alignment: .topTrailing) {
+            ExposureHistogram(bins: camera.histogram, live: p.ready)
+                .padding(8)
+                .opacity(camera.cameraControlFullscreen ? 0 : 1)
+        }
+        .overlay {
+            if showLevel && !camera.cameraControlFullscreen {
+                LevelDisplay(roll: level.roll(for: orientation))
+            }
+        }
+    }
+
+    private var captureControls: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text(p.burst ? (p.used == 30 ? "Buffer full · AF-C" : "Burst · AF-C") : "Buffer")
+                Text("\(p.used)/30")
+                Spacer()
+                Text("\(p.saved) saved")
+            }
+            .font(.caption.monospacedDigit())
+            if !p.message.isEmpty {
+                Text(p.message).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if p.saveFailed { Button("Retry saving", action: camera.retry) }
+            Picker("Adjustment", selection: $tab) {
+                ForEach(Adjustment.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented)
+            controls
+                .disabled(!p.ready || p.busy)
+            Shutter(camera: camera, enabled: p.ready && !p.saveFailed, burst: p.burst)
+                .frame(width: 66, height: 66)
+            Text("Tap for one photo · Hold for burst").font(.caption)
+        }
+        .opacity(camera.cameraControlFullscreen ? 0 : 1)
+        .allowsHitTesting(!camera.cameraControlFullscreen)
     }
 
     @ViewBuilder private var controls: some View {

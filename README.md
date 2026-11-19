@@ -2,7 +2,7 @@
 
 An iPhone camera for iOS 18 and later. Open `RawCamera.xcodeproj` in Xcode 16 or later, select the RawCamera target, choose your signing team and a unique bundle identifier under Signing & Capabilities, then run the RawCamera scheme on an iPhone. Grant Camera and Photos add access.
 
-Choose a physical rear lens using the circular magnification buttons at the bottom of the viewfinder. Tap a subject in the viewfinder to move the autofocus point. Tap-to-focus exits manual focus and tracks at that point. Focus taps and lens changes are disabled during capture. Each lens reports its own Bayer RAW and manual-control capabilities. Use **Exposure** to set shutter duration and ISO together, **WB** to set color temperature, and **Focus** to set lens position. The portrait viewfinder shows the whole frame. The app uses the phone orientation to set the capture orientation.
+Choose a physical rear lens using the circular magnification buttons at the bottom of the viewfinder. Tap a subject in the viewfinder to move the autofocus point. Tap-to-focus exits manual focus and tracks at that point. Focus taps and lens changes are disabled during capture. Each lens reports its own Bayer RAW and manual-control capabilities. Use **Exposure** to set shutter duration and ISO together, **WB** to set color temperature, and **Focus** to set lens position. The viewfinder shows the whole frame. The interface and preview rotate between portrait and landscape, and captures use the interface orientation.
 
 Tap the shutter for one DNG. Hold it for at least 0.25 seconds for repeated captures using continuous autofocus. Release to stop requesting frames. If manual focus was selected, the app restores its position after outstanding captures finish. A lens without continuous autofocus supports single shots if it provides Bayer RAW.
 
@@ -30,3 +30,11 @@ The exposure histogram shows sampled live-preview luminance in 64 bins, with sha
 While the app is open with the camera running, Camera Control presses take a single photo and holds start a burst. Cancellation stops capture requests. On supported hardware, a light press opens system controls for physical lens selection, shutter speed, ISO, white balance, and focus, subject to the device's supported controls. Hardware adjustments switch the corresponding setting into manual mode. During bursts, continuous autofocus takes over and adjustment controls are disabled until capture finishes.
 
 Verify the histogram by moving between dark and bright scenes and changing manual exposure. On an iPhone with Camera Control, check press, hold, release, cancellation, light-press adjustments, and switching lenses. Backgrounding the app should stop capture and disable hardware adjustments.
+
+## Viewfinder options
+
+Use the sliders icon in the navigation bar to choose Off, Rule of Thirds, or Golden Ratio for the grid and to toggle the level. Choices persist between launches. The golden ratio grid divides each axis at approximately 38.2% and 61.8%. Grids follow the camera image area, including when the viewfinder has letterboxing.
+
+The compact histogram sits in the top-right corner of the viewfinder. The level shows the horizon relative to the current interface orientation, with a yellow indicator within one degree of level. Motion updates run only while the level is enabled and the app is active. The level shows unavailable when motion data is unavailable or the phone is too flat for a reliable horizon.
+
+Check portrait and both landscape directions, including rotation during a burst. Confirm the preview and saved DNG orientation match, the focus square remains at the selected subject point after rotation, both grids align to the image, and the level reads near zero with a horizontal horizon. Rotation follows the system's orientation behavior.
