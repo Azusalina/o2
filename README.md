@@ -2,7 +2,7 @@
 
 An iPhone camera for iOS 18 and later. Open `RawCamera.xcodeproj` in Xcode 16 or later, select the RawCamera target, choose your signing team and a unique bundle identifier under Signing & Capabilities, then run the RawCamera scheme on an iPhone. Grant Camera and Photos add access.
 
-Choose a physical rear lens from the top menu. Each lens reports its own Bayer RAW and manual-control capabilities. Use **Exposure** to set shutter duration and ISO together, **WB** to set color temperature, and **Focus** to set lens position. The portrait viewfinder shows the whole frame. The app uses the phone orientation to set the capture orientation.
+Choose a physical rear lens using the circular magnification buttons at the bottom of the viewfinder. Tap a subject in the viewfinder to move the autofocus point. Tap-to-focus exits manual focus and tracks at that point. Focus taps and lens changes are disabled during capture. Each lens reports its own Bayer RAW and manual-control capabilities. Use **Exposure** to set shutter duration and ISO together, **WB** to set color temperature, and **Focus** to set lens position. The portrait viewfinder shows the whole frame. The app uses the phone orientation to set the capture orientation.
 
 Tap the shutter for one DNG. Hold it for at least 0.25 seconds for repeated captures using continuous autofocus. Release to stop requesting frames. If manual focus was selected, the app restores its position after outstanding captures finish. A lens without continuous autofocus supports single shots if it provides Bayer RAW.
 
@@ -14,3 +14,11 @@ The buffer meter counts outstanding requests, queued DNGs, and the photo current
 - Select a physical lens and move close to a subject. Confirm framing stays on the chosen lens.
 - Set manual focus, hold the shutter, and alternate between near and far subjects. Check AF tracking during the burst and the return to the selected focus position on release.
 - Hold for more than 30 total frames. Watch the buffer count, release, and wait for it to reach zero. Compare the saved count with the new DNG assets in Photos.
+
+## Automatic releases
+
+Every push to master builds on macOS and publishes a new unsigned IPA with a unique tag of the form v1.0.<GitHub run number>. Manual workflow runs also publish a release. Rerunning a workflow replaces the asset for that same build. The app version and build number match the workflow run. Sign the downloaded IPA using your sideloading tool before installation.
+
+RAW requests are serialized while the burst timer continues polling capture readiness. Continuous autofocus stays enabled throughout a burst. Temporary AVFoundation capture failures back off for 250 ms and allow up to three consecutive retries. Single shots also wait briefly for capture readiness. Errors include their operation, domain, code, and underlying error when available.
+
+Test tap-to-focus on near and far subjects, lens changes, and a held burst while moving between subjects on an iPhone. The CI build validates compilation and packaging. Autofocus behavior and the reported capture failure require on-device verification.

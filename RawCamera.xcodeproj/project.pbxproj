@@ -228,6 +228,10 @@
 				<string>iphoneos iphonesimulator</string>
 				<key>SUPPORTS_MACCATALYST</key>
 				<string>NO</string>
+				<key>MARKETING_VERSION</key>
+				<string>1.0</string>
+				<key>CURRENT_PROJECT_VERSION</key>
+				<string>1</string>
 			</dict>
 		</dict>
 		<key>000000000000000000000033</key>
@@ -252,6 +256,10 @@
 				<string>iphoneos iphonesimulator</string>
 				<key>SUPPORTS_MACCATALYST</key>
 				<string>NO</string>
+				<key>MARKETING_VERSION</key>
+				<string>1.0</string>
+				<key>CURRENT_PROJECT_VERSION</key>
+				<string>1</string>
 			</dict>
 		</dict>
 		<key>000000000000000000000034</key>

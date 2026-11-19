@@ -12,17 +12,52 @@ struct RawCameraApp: App {
 private final class PreviewView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    var onFocus: ((CGPoint) -> Void)?
+    var focusEnabled = false
+    private let focusRing = CALayer()
+    private var hideRing: DispatchWorkItem?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
+        focusRing.borderWidth = 1.5
+        focusRing.borderColor = UIColor.systemYellow.cgColor
+        focusRing.isHidden = true
+        layer.addSublayer(focusRing)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func tapped(_ gesture: UITapGestureRecognizer) {
+        guard focusEnabled else { return }
+        let point = gesture.location(in: self)
+        let imageRect = preview.layerRectConverted(fromMetadataOutputRect: CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard imageRect.contains(point) else { return }
+        onFocus?(preview.captureDevicePointConverted(fromLayerPoint: point))
+        hideRing?.cancel()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        focusRing.frame = CGRect(x: point.x - 30, y: point.y - 30, width: 60, height: 60)
+        focusRing.isHidden = false
+        CATransaction.commit()
+        let work = DispatchWorkItem { [weak self] in self?.focusRing.isHidden = true }
+        hideRing = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
 }
 
 private struct Preview: UIViewRepresentable {
-    let session: AVCaptureSession
+    let camera: Camera
+    let focusEnabled: Bool
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.preview.videoGravity = .resizeAspect
-        view.preview.session = session
+        view.preview.session = camera.session
         return view
     }
     func updateUIView(_ view: PreviewView, context: Context) {
+        view.focusEnabled = focusEnabled
+        view.onFocus = { camera.focus(at: $0) }
         if let connection = view.preview.connection, connection.isVideoRotationAngleSupported(90), connection.videoRotationAngle != 90 {
             connection.videoRotationAngle = 90
         }
@@ -91,23 +126,32 @@ private struct Viewfinder: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack {
-                Menu {
-                    ForEach(p.lenses) { lens in
-                        Button { camera.select(lens.id) } label: {
-                            if lens.id == p.lens { Label(lens.name, systemImage: "checkmark") }
-                            else { Text(lens.name) }
-                        }
-                    }
-                } label: {
-                    Label(p.lenses.first(where: { $0.id == p.lens })?.name ?? "Lens", systemImage: "camera.aperture")
-                }
-                .disabled(p.busy || p.lenses.isEmpty)
+                Text(p.lenses.first(where: { $0.id == p.lens })?.name ?? "Lens")
+                    .font(.subheadline)
                 Spacer()
                 Text("DNG").font(.caption.bold())
             }
-            Preview(session: camera.session)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityHidden(true)
+            ZStack(alignment: .bottom) {
+                Preview(camera: camera, focusEnabled: p.ready && !p.busy && p.canTapFocus)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityHidden(true)
+                HStack(spacing: 12) {
+                    ForEach(p.lenses) { lens in
+                        Button { camera.select(lens.id) } label: {
+                            Text(lens.magnification)
+                                .font(.subheadline.bold().monospacedDigit())
+                                .foregroundStyle(lens.id == p.lens ? .yellow : .white)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .background(.black.opacity(0.7), in: Circle())
+                                .overlay(Circle().stroke(lens.id == p.lens ? Color.yellow : Color.clear))
+                        }
+                        .accessibilityLabel(lens.name)
+                        .accessibilityValue(lens.id == p.lens ? "Selected" : "")
+                    }
+                }
+                .disabled(p.busy)
+                .padding(.bottom, 12)
+            }
             HStack {
                 Text(p.burst ? (p.used == 30 ? "Buffer full · AF-C" : "Burst · AF-C") : "Buffer")
                 Text("\(p.used)/30")

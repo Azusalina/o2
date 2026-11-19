@@ -5,6 +5,7 @@ import SwiftUI
 struct Lens: Identifiable, Equatable {
     let id: String
     let name: String
+    let magnification: String
 }
 
 struct Panel {
@@ -15,6 +16,7 @@ struct Panel {
     var burst = false
     var canFocus = false
     var canTrack = false
+    var canTapFocus = false
     var canExpose = false
     var canBalance = false
     var manualFocus = false
@@ -55,6 +57,12 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     private var rotation: CGFloat = 90
     private var inFlight = Set<Int64>()
     private var representations: [Int64: Data] = [:]
+    private var captureErrors: [Int64: Error] = [:]
+    private var singleCaptureID: Int64?
+    private var singleRetry: DispatchWorkItem?
+    private var singleAttempts = 0
+    private var consecutiveFailures = 0
+    private var nextCaptureTime = DispatchTime.now()
     private var pending: [Data] = []
     private var writing = false
     private let capacity = 30
@@ -71,7 +79,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     private func publish() {
         state.used = occupied
         state.burst = pulse != nil
-        state.busy = pressed || !inFlight.isEmpty
+        state.busy = pressed || !inFlight.isEmpty || singleRetry != nil
         state.ready = active && !interrupted && session.isRunning && rawFormat != nil
         let snapshot = state
         DispatchQueue.main.async { self.panel = snapshot }
@@ -83,6 +91,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             if value {
                 self.requestAccess()
             } else {
+                self.cancelSingleRetry()
                 self.endHold()
                 if self.session.isRunning { self.session.stopRunning() }
                 self.publish()
@@ -113,7 +122,13 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
         guard active, authorized, !interrupted else { return }
         if input == nil {
             devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTelephotoCamera], mediaType: .video, position: .back).devices
-            state.lenses = devices.map { Lens(id: $0.uniqueID, name: $0.localizedName) }
+            devices.sort { $0.activeFormat.videoFieldOfView > $1.activeFormat.videoFieldOfView }
+            let wideFOV = devices.first(where: { $0.deviceType == .builtInWideAngleCamera })?.activeFormat.videoFieldOfView ?? 60
+            state.lenses = devices.map {
+                let ratio = tan(Double(wideFOV) * .pi / 360) / tan(Double($0.activeFormat.videoFieldOfView) * .pi / 360)
+                let label = $0.deviceType == .builtInWideAngleCamera ? "1×" : String(format: "%g×", (ratio * 10).rounded() / 10)
+                return Lens(id: $0.uniqueID, name: $0.localizedName, magnification: label)
+            }
             guard let first = devices.first(where: { $0.deviceType == .builtInWideAngleCamera }) ?? devices.first else {
                 state.message = "No rear camera found."
                 publish()
@@ -128,7 +143,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
 
     func select(_ id: String) {
         queue.async {
-            guard !self.pressed, self.inFlight.isEmpty, let device = self.devices.first(where: { $0.uniqueID == id }), device.uniqueID != self.state.lens else { return }
+            guard !self.state.busy, let device = self.devices.first(where: { $0.uniqueID == id }), device.uniqueID != self.state.lens else { return }
             self.configure(device)
             self.publish()
         }
@@ -168,6 +183,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             state.focus = Double(device.lensPosition)
             state.canFocus = device.isLockingFocusWithCustomLensPositionSupported
             state.canTrack = device.isFocusModeSupported(.continuousAutoFocus)
+            state.canTapFocus = device.isFocusPointOfInterestSupported && state.canTrack
             state.canExpose = device.isExposureModeSupported(.custom)
             state.canBalance = device.isLockingWhiteBalanceWithCustomDeviceGainsSupported
             state.manualExposure = device.exposureMode == .custom
@@ -187,7 +203,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     enum Control { case exposure, balance, focus }
     func control(_ control: Control, manual: Bool, value: Double? = nil, iso: Double? = nil) {
         queue.async {
-            guard !self.pressed, self.inFlight.isEmpty, let device = self.input?.device else { return }
+            guard !self.state.busy, let device = self.input?.device else { return }
             do {
                 try device.lockForConfiguration()
                 defer { device.unlockForConfiguration() }
@@ -238,6 +254,23 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
         min(range.upperBound, max(range.lowerBound, n))
     }
 
+    func focus(at point: CGPoint) {
+        queue.async {
+            guard self.state.ready, !self.state.busy, self.state.canTapFocus,
+                  let device = self.input?.device else { return }
+            do {
+                try device.lockForConfiguration()
+                device.focusPointOfInterest = CGPoint(x: min(1, max(0, point.x)), y: min(1, max(0, point.y)))
+                device.focusMode = .continuousAutoFocus
+                device.unlockForConfiguration()
+                self.state.manualFocus = false
+            } catch {
+                self.state.message = self.describe(error, operation: "Focus")
+            }
+            self.publish()
+        }
+    }
+
     func orient(_ orientation: UIDeviceOrientation) {
         queue.async {
             switch orientation {
@@ -252,7 +285,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
 
     func down() {
         queue.async {
-            guard self.state.ready, !self.state.saveFailed, !self.pressed, !self.restoreFocus else { return }
+            guard self.state.ready, !self.state.saveFailed, !self.state.busy, !self.restoreFocus else { return }
             self.pressed = true
             self.longPress = false
             let work = DispatchWorkItem { [weak self] in self?.beginBurst() }
@@ -267,7 +300,11 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             guard self.pressed else { return }
             let single = !cancel && !self.longPress
             self.endHold()
-            if single { self.capture(burst: false) }
+            if single {
+                self.singleAttempts = 0
+                self.consecutiveFailures = 0
+                self.captureSingle()
+            }
             self.publish()
         }
     }
@@ -285,6 +322,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             device.focusMode = AVCaptureDevice.FocusMode.continuousAutoFocus
             device.unlockForConfiguration()
             restoreFocus = state.manualFocus
+            consecutiveFailures = 0
             let timer = DispatchSource.makeTimerSource(queue: queue)
             pulse = timer
             timer.schedule(deadline: .now(), repeating: .milliseconds(50))
@@ -319,7 +357,9 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     private func capture(burst: Bool) {
         guard active, session.isRunning, !interrupted, !state.saveFailed, let rawFormat else { return }
         if burst && (pulse == nil || input?.device.focusMode != .continuousAutoFocus) { return }
-        guard occupied < capacity, inFlight.count < 3, output.captureReadiness == .ready else {
+        // A physical RAW pipeline can reject overlapping captures while AF moves.
+        // The timer still polls rapidly, with only one hardware request outstanding.
+        guard occupied < capacity, inFlight.isEmpty, DispatchTime.now() >= nextCaptureTime, output.captureReadiness == .ready else {
             if !burst { state.message = "Camera busy. Tap again." }
             return
         }
@@ -327,8 +367,10 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             connection.videoRotationAngle = rotation
         }
         let settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+        settings.isAutoStillImageStabilizationEnabled = false
         settings.photoQualityPrioritization = .speed
         inFlight.insert(settings.uniqueID)
+        if !burst { singleCaptureID = settings.uniqueID }
         state.message = ""
         output.capturePhoto(with: settings, delegate: self)
         publish()
@@ -341,9 +383,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             guard self.inFlight.contains(id) else { return }
             self.representations[id] = data
             if data == nil {
-                self.state.message = error?.localizedDescription ?? "Could not create DNG."
-                self.endHold()
-                self.publish()
+                self.captureErrors[id] = error ?? NSError(domain: "RawCamera", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create DNG."])
             }
         }
     }
@@ -352,16 +392,72 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
         queue.async {
             let id = resolvedSettings.uniqueID
             guard self.inFlight.remove(id) != nil else { return }
+            let wasSingle = self.singleCaptureID == id
+            if wasSingle { self.singleCaptureID = nil }
             let data = self.representations.removeValue(forKey: id)
-            if let data { self.pending.append(data) }
-            if let error {
-                self.state.message = error.localizedDescription
-                self.endHold()
+            let failure = self.captureErrors.removeValue(forKey: id) ?? error
+            if let data {
+                self.pending.append(data)
+                self.consecutiveFailures = 0
+                if !self.state.saveFailed { self.state.message = "" }
+            } else if let failure {
+                self.consecutiveFailures += 1
+                self.nextCaptureTime = .now() + .milliseconds(250)
+                if self.isTransientCaptureError(failure) && self.consecutiveFailures <= 3 {
+                    self.state.message = "Camera recovering…"
+                    if wasSingle { self.scheduleSingleRetry() }
+                } else {
+                    self.state.message = self.describe(failure, operation: "Capture")
+                    self.endHold()
+                }
             }
             self.restoreIfFinished()
             self.drain()
             self.publish()
         }
+    }
+
+    private func captureSingle() {
+        guard active, !interrupted, !state.saveFailed else { return }
+        if output.captureReadiness != .ready || DispatchTime.now() < nextCaptureTime {
+            scheduleSingleRetry()
+        } else {
+            capture(burst: false)
+        }
+    }
+
+    private func scheduleSingleRetry() {
+        guard active, !interrupted, !state.saveFailed, singleAttempts < 8 else {
+            state.message = "Camera busy. Tap again."
+            return
+        }
+        singleAttempts += 1
+        singleRetry?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.singleRetry = nil
+            self.captureSingle()
+            self.publish()
+        }
+        singleRetry = work
+        queue.asyncAfter(deadline: .now() + .milliseconds(250), execute: work)
+    }
+
+    private func cancelSingleRetry() {
+        singleRetry?.cancel()
+        singleRetry = nil
+    }
+
+    private func isTransientCaptureError(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == AVFoundationErrorDomain && error.code == AVError.Code.unknown.rawValue
+    }
+
+    private func describe(_ error: Error, operation: String) -> String {
+        let error = error as NSError
+        let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        let detail = underlying.map { " / \($0.domain) \($0.code)" } ?? ""
+        return "\(operation): \(error.localizedDescription) (\(error.domain) \(error.code)\(detail))"
     }
 
     private func drain() {
@@ -381,7 +477,8 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
                     self.drain()
                 } else {
                     self.state.saveFailed = true
-                    self.state.message = error?.localizedDescription ?? "Photos could not save this file."
+                    self.state.message = error.map { self.describe($0, operation: "Save") } ?? "Photos could not save this file."
+                    self.cancelSingleRetry()
                     self.endHold()
                 }
                 self.publish()
@@ -401,6 +498,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     @objc private func interruption(_ note: Notification) {
         queue.async {
             self.interrupted = true
+            self.cancelSingleRetry()
             self.endHold()
             self.state.message = "Camera interrupted."
             self.publish()
@@ -409,6 +507,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
 
     @objc private func resumed(_ note: Notification) {
         queue.async {
+            self.cancelSingleRetry()
             self.interrupted = false
             self.state.message = ""
             self.start()
@@ -419,8 +518,9 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
     @objc private func runtimeError(_ note: Notification) {
         let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
         queue.async {
+            self.cancelSingleRetry()
             self.endHold()
-            self.state.message = error?.localizedDescription ?? "Camera session failed."
+            self.state.message = error.map { self.describe($0, operation: "Camera") } ?? "Camera session failed."
             if error?.code == AVError.Code.mediaServicesWereReset.rawValue { self.start() }
             self.publish()
         }

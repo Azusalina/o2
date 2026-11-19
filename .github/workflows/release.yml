@@ -1,21 +1,24 @@
-name: Build IPA and release v1.0
+name: Build IPA and release
 
 on:
   push:
-    tags:
-      - v1.0
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: raw-camera-v1.0
+  group: raw-camera-release
   cancel-in-progress: false
 
 defaults:
   run:
     shell: bash
+
+env:
+  RELEASE_TAG: v1.0.${{ github.run_number }}
 
 jobs:
   build:
@@ -28,12 +31,23 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      # An unsigned device build can be packaged without Apple credentials.
-      # Sign the downloaded IPA with your sideloading tool before installation.
+      # Sign the downloaded IPA with a sideloading tool before installation.
       - name: Compile for iPhone
         run: |
           set -euo pipefail
-          xcodebuild             -project RawCamera.xcodeproj             -scheme RawCamera             -configuration Release             -sdk iphoneos             -destination 'generic/platform=iOS'             -derivedDataPath "$RUNNER_TEMP/RawCameraBuild"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             build
+          xcodebuild \
+            -project RawCamera.xcodeproj \
+            -scheme RawCamera \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/RawCameraBuild" \
+            MARKETING_VERSION="${RELEASE_TAG#v}" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
 
       - name: Package IPA
         run: |
@@ -42,14 +56,14 @@ jobs:
           test -d "$app"
           mkdir -p "$RUNNER_TEMP/ipa/Payload" dist
           ditto "$app" "$RUNNER_TEMP/ipa/Payload/RawCamera.app"
-          ditto -c -k --keepParent "$RUNNER_TEMP/ipa/Payload" dist/RawCamera-v1.0-unsigned.ipa
-          unzip -t dist/RawCamera-v1.0-unsigned.ipa
+          ditto -c -k --keepParent "$RUNNER_TEMP/ipa/Payload" "dist/RawCamera-$RELEASE_TAG-unsigned.ipa"
+          unzip -t "dist/RawCamera-$RELEASE_TAG-unsigned.ipa"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RawCamera-v1.0-unsigned
-          path: dist/RawCamera-v1.0-unsigned.ipa
+          name: RawCamera-${{ env.RELEASE_TAG }}-unsigned
+          path: dist/*.ipa
           if-no-files-found: error
           retention-days: 30
 
@@ -68,35 +82,35 @@ jobs:
       - name: Download IPA
         uses: actions/download-artifact@v4
         with:
-          name: RawCamera-v1.0-unsigned
+          name: RawCamera-${{ env.RELEASE_TAG }}-unsigned
           path: dist
 
-      - name: Publish v1.0
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # A manual run may create the tag. An existing tag must identify
-          # exactly the source that produced this IPA.
-          if git show-ref --verify --quiet refs/tags/v1.0; then
-            if [[ "$(git rev-parse 'refs/tags/v1.0^{commit}')" != "$(git rev-parse HEAD)" ]]; then
-              echo "::error::v1.0 already points to another commit. Run this workflow on the v1.0 tag."
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            if [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+              echo "::error::Release tag points to another commit."
               exit 1
             fi
           fi
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          RAW Camera v1.0 for iPhone running iOS 18 or later.
+          RAW Camera for iPhone running iOS 18 or later.
 
-          Manual shutter speed, ISO, white balance, focus, and physical lens selection.
-          Hold the shutter for RAW burst capture with continuous autofocus.
-          A 30-photo buffer continuously saves DNG files to Photos.
+          Manual exposure, white balance, focus, physical lens selection, and tap-to-focus.
+          Hold the shutter for RAW bursts with continuous autofocus and a 30-photo buffer.
 
-          Download RawCamera-v1.0-unsigned.ipa and sign it using your sideloading tool before installing.
+          Sign the unsigned IPA with your sideloading tool before installing.
           NOTES
-          # Query the list so authentication/network errors fail the step.
-          release_id="$(gh release list --limit 1000 --json tagName --jq '.[] | select(.tagName == "v1.0") | .tagName')"
+          release_id="$(gh release list --limit 1000 --json tagName --jq ".[] | select(.tagName == \"$RELEASE_TAG\") | .tagName")"
           if [[ -z "$release_id" ]]; then
-            gh release create v1.0               --target "$(git rev-parse HEAD)"               --title "RAW Camera v1.0"               --notes-file "$RUNNER_TEMP/release-notes.md"               dist/RawCamera-v1.0-unsigned.ipa
+            gh release create "$RELEASE_TAG" \
+              --target "$(git rev-parse HEAD)" \
+              --title "RAW Camera $RELEASE_TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              "dist/RawCamera-$RELEASE_TAG-unsigned.ipa"
           else
-            gh release upload v1.0 dist/RawCamera-v1.0-unsigned.ipa --clobber
+            gh release upload "$RELEASE_TAG" "dist/RawCamera-$RELEASE_TAG-unsigned.ipa" --clobber
           fi
