@@ -89,8 +89,6 @@ private final class PreviewView: UIView {
     var onFocus: ((CGPoint) -> Void)?
     var focusEnabled = false
     var grid = GridMode.off
-    var onOrientation: ((UIInterfaceOrientation) -> Void)?
-    private var orientation = UIInterfaceOrientation.unknown
     private let gridLayer = CAShapeLayer()
     private let focusRing = CALayer()
     var focusPoint = CGPoint(x: 0.5, y: 0.5)
@@ -111,24 +109,6 @@ private final class PreviewView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        if let current = window?.windowScene?.interfaceOrientation, current != .unknown {
-            let angle: CGFloat
-            switch current {
-            case .landscapeLeft: angle = 180
-            case .landscapeRight: angle = 0
-            case .portraitUpsideDown: angle = 270
-            default: angle = 90
-            }
-            if let connection = preview.connection, connection.isVideoRotationAngleSupported(angle),
-               connection.videoRotationAngle != angle {
-                connection.videoRotationAngle = angle
-            }
-            if orientation != current {
-                orientation = current
-                // Publish after UIKit finishes this layout pass.
-                DispatchQueue.main.async { [weak self] in self?.onOrientation?(current) }
-            }
-        }
         let imageRect = preview.layerRectConverted(fromMetadataOutputRect: CGRect(x: 0, y: 0, width: 1, height: 1)).intersection(bounds)
         let path = UIBezierPath()
         if !imageRect.isNull {
@@ -164,19 +144,54 @@ private final class PreviewView: UIView {
     }
 }
 
-private struct Preview: UIViewRepresentable {
+private final class PreviewController: UIViewController {
+    let previewView = PreviewView()
+    var onOrientation: ((UIInterfaceOrientation, AVCaptureConnection) -> Void)?
+    private var orientation = UIInterfaceOrientation.unknown
+    private weak var orientedConnection: AVCaptureConnection?
+    private var transitioning = false
+
+    override func loadView() { view = previewView }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        updateOrientation()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        transitioning = true
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.transitioning = false
+            self?.updateOrientation()
+        }
+    }
+
+    func updateOrientation() {
+        guard !transitioning,
+              let current = view.window?.windowScene?.interfaceOrientation, current != .unknown,
+              let connection = previewView.preview.connection else { return }
+        guard orientation != current || orientedConnection !== connection else { return }
+        orientation = current
+        orientedConnection = connection
+        onOrientation?(current, connection)
+    }
+}
+
+private struct Preview: UIViewControllerRepresentable {
     let camera: Camera
     let focusEnabled: Bool
     let grid: GridMode
     @Binding var focusPoint: CGPoint
     @Binding var orientation: UIInterfaceOrientation
-    func makeUIView(context: Context) -> PreviewView {
-        let view = PreviewView()
-        view.preview.videoGravity = .resizeAspect
-        view.preview.session = camera.session
-        return view
+    func makeUIViewController(context: Context) -> PreviewController {
+        let controller = PreviewController()
+        controller.previewView.preview.videoGravity = .resizeAspect
+        controller.previewView.preview.session = camera.session
+        return controller
     }
-    func updateUIView(_ view: PreviewView, context: Context) {
+    func updateUIViewController(_ controller: PreviewController, context: Context) {
+        let view = controller.previewView
         view.focusEnabled = focusEnabled
         view.grid = grid
         view.focusPoint = focusPoint
@@ -184,11 +199,14 @@ private struct Preview: UIViewRepresentable {
             focusPoint = $0
             camera.focus(at: $0)
         }
-        view.onOrientation = {
-            orientation = $0
-            camera.orient($0)
+        controller.onOrientation = { [weak controller] direction, connection in
+            camera.orient(direction, previewConnection: connection) { [weak controller] in
+                orientation = direction
+                controller?.previewView.setNeedsLayout()
+            }
         }
         view.setNeedsLayout()
+        controller.updateOrientation()
     }
 }
 
@@ -287,20 +305,18 @@ private struct Viewfinder: View {
 
     var body: some View {
         GeometryReader { geometry in
-            if geometry.size.width > geometry.size.height {
-                HStack(spacing: 16) {
+            let landscape = geometry.size.width > geometry.size.height
+            let layout = landscape ? AnyLayout(HStackLayout(spacing: 16)) : AnyLayout(VStackLayout(spacing: 10))
+            VStack(spacing: 10) {
+                navigation
+                // AnyLayout preserves the preview controller and session attachment.
+                layout {
                     viewfinder
-                    VStack(spacing: 10) {
-                        navigation
+                    ViewThatFits(in: .vertical) {
+                        captureControls.fixedSize(horizontal: false, vertical: true)
                         ScrollView { captureControls }
                     }
-                    .frame(width: min(280, geometry.size.width * 0.36))
-                }
-            } else {
-                VStack(spacing: 10) {
-                    navigation
-                    viewfinder
-                    captureControls
+                    .frame(width: landscape ? min(280, geometry.size.width * 0.36) : nil)
                 }
             }
         }

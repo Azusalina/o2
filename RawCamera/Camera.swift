@@ -430,7 +430,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         }
     }
 
-    func orient(_ orientation: UIInterfaceOrientation) {
+    func orient(_ orientation: UIInterfaceOrientation, previewConnection: AVCaptureConnection, completion: @escaping () -> Void) {
         queue.async {
             switch orientation {
             case .landscapeLeft: self.rotation = 180
@@ -439,6 +439,12 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
             case .portraitUpsideDown: self.rotation = 270
             default: break
             }
+            // Serialize connection changes with capture/session operations.
+            if previewConnection.isVideoRotationAngleSupported(self.rotation),
+               previewConnection.videoRotationAngle != self.rotation {
+                previewConnection.videoRotationAngle = self.rotation
+            }
+            DispatchQueue.main.async(execute: completion)
         }
     }
 
