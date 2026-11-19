@@ -434,16 +434,34 @@ private struct Viewfinder: View {
     @ViewBuilder private var controls: some View {
         switch tab {
         case .exposure:
-            Toggle("Manual exposure", isOn: Binding(get: { p.manualExposure }, set: { camera.control(.exposure, manual: $0) }))
-                .disabled(!p.canExpose)
-            if p.manualExposure {
+            Picker("Exposure mode", selection: Binding(get: { p.exposureMode }, set: camera.setExposureMode)) {
+                ForEach(ExposureMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(!p.canExpose)
+            if p.exposureMode == .manual || p.exposureMode == .shutterPriority {
                 slider("Shutter", value: p.duration < 0.5 ? "1/\(Int((1 / p.duration).rounded())) s" : String(format: "%.2f s", p.duration),
                        current: log2(p.duration), range: log2(p.durations.lowerBound)...log2(p.durations.upperBound)) {
                     camera.control(.exposure, manual: true, value: exp2($0))
                 }
+            }
+            if p.exposureMode == .manual || p.exposureMode == .isoPriority {
                 slider("ISO", value: "\(Int(p.iso))", current: log2(p.iso), range: log2(p.isos.lowerBound)...log2(p.isos.upperBound)) {
                     camera.control(.exposure, manual: true, iso: exp2($0))
                 }
+            }
+            if p.exposureMode == .shutterPriority {
+                Text("Auto ISO \(Int(p.iso))").font(.footnote.monospacedDigit())
+            }
+            if p.exposureMode == .isoPriority {
+                Text(p.duration < 0.5 ? "Auto shutter 1/\(Int((1 / p.duration).rounded())) s" : String(format: "Auto shutter %.2f s", p.duration))
+                    .font(.footnote.monospacedDigit())
+            }
+            if p.exposureMode.isPriority {
+                Text(String(format: "Meter %+.1f EV", p.exposureOffset))
+                    .font(.caption.monospacedDigit())
             }
         case .balance:
             Toggle("Manual white balance", isOn: Binding(get: { p.manualBalance }, set: { camera.control(.balance, manual: $0) }))

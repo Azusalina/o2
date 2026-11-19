@@ -77,6 +77,7 @@
 				<string>00000000000000000000000A</string>
 				<string>00000000000000000000000B</string>
 				<string>00000000000000000000000C</string>
+				<string>00000000000000000000000D</string>
 			</array>
 			<key>path</key>
 			<string>RawCamera</string>
@@ -118,6 +119,7 @@
 			<array>
 				<string>000000000000000000000014</string>
 				<string>000000000000000000000015</string>
+				<string>000000000000000000000017</string>
 			</array>
 			<key>runOnlyForDeploymentPostprocessing</key>
 			<string>0</string>
@@ -337,6 +339,24 @@
 			<array>
 				<string>000000000000000000000006</string>
 			</array>
+		</dict>
+		<key>00000000000000000000000D</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Exposure.swift</string>
+			<key>sourceTree</key>
+			<string>&lt;group&gt;</string>
+		</dict>
+		<key>000000000000000000000017</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>00000000000000000000000D</string>
 		</dict>
 	</dict>
 	<key>rootObject</key>

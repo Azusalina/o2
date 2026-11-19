@@ -20,7 +20,8 @@ struct Panel {
     var canExpose = false
     var canBalance = false
     var manualFocus = false
-    var manualExposure = false
+    var exposureMode = ExposureMode.automatic
+    var exposureOffset = 0.0
     var manualBalance = false
     var focus = 0.5
     var duration = 1.0 / 125
@@ -76,6 +77,10 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
     private var singleAttempts = 0
     private var consecutiveFailures = 0
     private var nextCaptureTime = DispatchTime.now()
+    private var exposureTimer: DispatchSourceTimer?
+    private var exposurePending = false
+    private var exposureGeneration = 0
+    private var nextMeterTime = DispatchTime.now()
     private var pending: [Data] = []
     private var writing = false
     private let capacity = 30
@@ -105,6 +110,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
             if value {
                 self.requestAccess()
             } else {
+                self.stopMetering()
                 self.cancelSingleRetry()
                 self.endHold()
                 if self.session.isRunning { self.session.stopRunning() }
@@ -151,7 +157,10 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
             configure(first)
         }
         if input != nil && !session.isRunning { session.startRunning() }
-        if session.isRunning { refreshRawFormat() }
+        if session.isRunning {
+            refreshRawFormat()
+            startMetering()
+        }
         publish()
     }
 
@@ -203,18 +212,19 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
             let format = device.activeFormat
             state.durations = format.minExposureDuration.seconds...format.maxExposureDuration.seconds
             state.isos = Double(format.minISO)...Double(format.maxISO)
-            state.duration = clamp(device.exposureDuration.seconds, state.durations)
-            state.iso = clamp(Double(device.iso), state.isos)
+            state.duration = clamp(state.exposureMode == .automatic ? device.exposureDuration.seconds : state.duration, state.durations)
+            state.iso = clamp(state.exposureMode == .automatic ? Double(device.iso) : state.iso, state.isos)
             state.focus = Double(device.lensPosition)
             state.canFocus = device.isLockingFocusWithCustomLensPositionSupported
             state.canTrack = device.isFocusModeSupported(.continuousAutoFocus)
             state.canTapFocus = device.isFocusPointOfInterestSupported && state.canTrack
             state.canExpose = device.isExposureModeSupported(.custom)
             state.canBalance = device.isLockingWhiteBalanceWithCustomDeviceGainsSupported
-            state.manualExposure = device.exposureMode == .custom
+            if !state.canExpose { state.exposureMode = .automatic }
             state.manualBalance = device.whiteBalanceMode == .locked && state.canBalance
             state.manualFocus = device.focusMode == .locked && state.canFocus
             refreshRawFormat()
+            try applyExposure(state.exposureMode, duration: state.duration, iso: state.iso, device: device)
             configureHardwareControls()
         } catch { state.message = error.localizedDescription }
     }
@@ -305,6 +315,8 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         for control in session.controls {
             control.isEnabled = active && !interrupted && !state.busy
         }
+        shutterControl?.isEnabled = active && !interrupted && !state.busy && state.exposureMode != .isoPriority
+        isoControl?.isEnabled = active && !interrupted && !state.busy && state.exposureMode != .shutterPriority
     }
 
     func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {}
@@ -363,23 +375,23 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
     func control(_ control: Control, manual: Bool, value: Double? = nil, iso: Double? = nil) {
         queue.async {
             guard !self.state.busy, let device = self.input?.device else { return }
+            if case .exposure = control {
+                let mode = manual ? (self.state.exposureMode == .automatic ? .manual : self.state.exposureMode) : ExposureMode.automatic
+                do {
+                    try self.applyExposure(mode,
+                                           duration: value ?? (self.state.exposureMode == .automatic ? device.exposureDuration.seconds : self.state.duration),
+                                           iso: iso ?? (self.state.exposureMode == .automatic ? Double(device.iso) : self.state.iso),
+                                           device: device)
+                } catch { self.state.message = self.describe(error, operation: "Exposure") }
+                self.publish()
+                return
+            }
             do {
                 try device.lockForConfiguration()
                 defer { device.unlockForConfiguration() }
                 switch control {
                 case .exposure:
-                    if manual && self.state.canExpose {
-                        let seconds = self.clamp(value ?? (self.state.manualExposure ? self.state.duration : device.exposureDuration.seconds), self.state.durations)
-                        let sensitivity = self.clamp(iso ?? (self.state.manualExposure ? self.state.iso : Double(device.iso)), self.state.isos)
-                        let duration = CMTime(seconds: seconds, preferredTimescale: 1_000_000_000)
-                        let format = device.activeFormat
-                        device.setExposureModeCustom(duration: CMTimeMinimum(format.maxExposureDuration, CMTimeMaximum(format.minExposureDuration, duration)), iso: Float(sensitivity), completionHandler: nil)
-                        self.state.duration = seconds
-                        self.state.iso = sensitivity
-                    } else if !manual && device.isExposureModeSupported(.continuousAutoExposure) {
-                        device.exposureMode = .continuousAutoExposure
-                    } else { return }
-                    self.state.manualExposure = manual
+                    break
                 case .balance:
                     if manual && self.state.canBalance {
                         let kelvin = self.clamp(value ?? self.state.kelvin, 2500...10000)
@@ -406,6 +418,86 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
                 }
             } catch { self.state.message = error.localizedDescription }
             self.publish()
+        }
+    }
+
+    func setExposureMode(_ mode: ExposureMode) {
+        queue.async {
+            guard !self.state.busy, let device = self.input?.device else { return }
+            let wasAuto = self.state.exposureMode == .automatic
+            do {
+                try self.applyExposure(mode,
+                                       duration: wasAuto ? device.exposureDuration.seconds : self.state.duration,
+                                       iso: wasAuto ? Double(device.iso) : self.state.iso,
+                                       device: device)
+            } catch { self.state.message = self.describe(error, operation: "Exposure") }
+            self.publish()
+        }
+    }
+
+    private func applyExposure(_ mode: ExposureMode, duration: Double, iso: Double, device: AVCaptureDevice) throws {
+        guard mode == .automatic ? device.isExposureModeSupported(.continuousAutoExposure) : state.canExpose else { return }
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+        exposureGeneration += 1
+        exposurePending = false
+        state.exposureMode = mode
+        if mode == .automatic {
+            device.exposureMode = .continuousAutoExposure
+            return
+        }
+        state.duration = clamp(duration, state.durations)
+        state.iso = clamp(iso, state.isos)
+        let time = CMTime(seconds: state.duration, preferredTimescale: 1_000_000_000)
+        let format = device.activeFormat
+        let generation = exposureGeneration
+        exposurePending = true
+        device.setExposureModeCustom(duration: CMTimeMinimum(format.maxExposureDuration, CMTimeMaximum(format.minExposureDuration, time)),
+                                     iso: Float(state.iso)) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                guard self.exposureGeneration == generation, self.input?.device.uniqueID == device.uniqueID else { return }
+                self.exposurePending = false
+                // Allow a fresh frame to reach the meter before correcting again.
+                self.nextMeterTime = .now() + max(0.2, self.state.duration * 2)
+                self.publish()
+            }
+        }
+    }
+
+    private func startMetering() {
+        guard exposureTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + .milliseconds(200), repeating: .milliseconds(200))
+        timer.setEventHandler { [weak self] in self?.meterExposure() }
+        exposureTimer = timer
+        timer.resume()
+    }
+
+    private func stopMetering() {
+        exposureTimer?.cancel()
+        exposureTimer = nil
+        exposureGeneration += 1
+        exposurePending = false
+    }
+
+    private func meterExposure() {
+        guard active, !interrupted, session.isRunning, !exposurePending,
+              let device = input?.device else { return }
+        let mode = state.exposureMode
+        let actual = ExposureValues(duration: device.exposureDuration.seconds, iso: Double(device.iso))
+        if mode == .automatic || mode == .isoPriority { state.duration = clamp(actual.duration, state.durations) }
+        if mode == .automatic || mode == .shutterPriority { state.iso = clamp(actual.iso, state.isos) }
+        state.exposureOffset = Double(device.exposureTargetOffset)
+        defer { publish() }
+        guard mode.isPriority, inFlight.isEmpty, singleRetry == nil, !state.saveFailed,
+              DispatchTime.now() >= nextMeterTime else { return }
+        let current = ExposureValues(duration: state.duration, iso: state.iso)
+        guard let next = current.meteredAdjustment(mode: mode, offset: state.exposureOffset, durations: state.durations, isos: state.isos) else { return }
+        do {
+            try applyExposure(mode, duration: next.duration, iso: next.iso, device: device)
+        } catch {
+            state.message = describe(error, operation: "Exposure")
         }
     }
 
@@ -524,7 +616,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         if burst && (pulse == nil || input?.device.focusMode != .continuousAutoFocus) { return }
         // A physical RAW pipeline can reject overlapping captures while AF moves.
         // The timer still polls rapidly, with only one hardware request outstanding.
-        guard occupied < capacity, inFlight.isEmpty, DispatchTime.now() >= nextCaptureTime, output.captureReadiness == .ready else {
+        guard occupied < capacity, inFlight.isEmpty, !exposurePending, DispatchTime.now() >= nextCaptureTime, output.captureReadiness == .ready else {
             if !burst { state.message = "Camera busy. Tap again." }
             return
         }
@@ -578,13 +670,14 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
             }
             self.restoreIfFinished()
             self.drain()
+            if self.pulse != nil { self.meterExposure() }
             self.publish()
         }
     }
 
     private func captureSingle() {
         guard active, !interrupted, !state.saveFailed else { return }
-        if output.captureReadiness != .ready || DispatchTime.now() < nextCaptureTime {
+        if exposurePending || output.captureReadiness != .ready || DispatchTime.now() < nextCaptureTime {
             scheduleSingleRetry()
         } else {
             capture(burst: false)
@@ -592,7 +685,8 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
     }
 
     private func scheduleSingleRetry() {
-        guard active, !interrupted, !state.saveFailed, singleAttempts < 8 else {
+        let attemptLimit = max(8, Int(ceil(state.duration * 4)) + 8)
+        guard active, !interrupted, !state.saveFailed, singleAttempts < attemptLimit else {
             state.message = "Camera busy. Tap again."
             return
         }
@@ -663,6 +757,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
     @objc private func interruption(_ note: Notification) {
         queue.async {
             self.interrupted = true
+            self.stopMetering()
             self.cancelSingleRetry()
             self.endHold()
             self.state.message = "Camera interrupted."
@@ -683,6 +778,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
     @objc private func runtimeError(_ note: Notification) {
         let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
         queue.async {
+            self.stopMetering()
             self.cancelSingleRetry()
             self.endHold()
             self.state.message = error.map { self.describe($0, operation: "Camera") } ?? "Camera session failed."

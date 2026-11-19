@@ -31,6 +31,12 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Check exposure priority calculations
+        run: |
+          set -euo pipefail
+          swiftc RawCamera/Exposure.swift Tests/ExposureChecks.swift -o "$RUNNER_TEMP/ExposureChecks"
+          "$RUNNER_TEMP/ExposureChecks"
+
       # Sign the downloaded IPA with a sideloading tool before installation.
       - name: Compile for iPhone
         run: |
@@ -99,7 +105,7 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
           RAW Camera for iPhone running iOS 18 or later.
 
-          Manual exposure, white balance, focus, physical lens selection, tap-to-focus, a compact live preview histogram, rotating interface, composition grids, a level, and Camera Control support.
+          Manual, shutter-priority, and ISO-priority exposure, white balance, focus, physical lens selection, tap-to-focus, a compact live preview histogram, rotating interface, composition grids, a level, and Camera Control support.
           Hold the shutter for RAW bursts with continuous autofocus and a 30-photo buffer.
 
           Sign the unsigned IPA with your sideloading tool before installing.

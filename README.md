@@ -2,7 +2,7 @@
 
 An iPhone camera for iOS 18 and later. Open `RawCamera.xcodeproj` in Xcode 16 or later, select the RawCamera target, choose your signing team and a unique bundle identifier under Signing & Capabilities, then run the RawCamera scheme on an iPhone. Grant Camera and Photos add access.
 
-Choose a physical rear lens using the circular magnification buttons at the bottom of the viewfinder. Tap a subject in the viewfinder to move the autofocus point. Tap-to-focus exits manual focus and tracks at that point. Focus taps and lens changes are disabled during capture. Each lens reports its own Bayer RAW and manual-control capabilities. Use **Exposure** to set shutter duration and ISO together, **WB** to set color temperature, and **Focus** to set lens position. The viewfinder shows the whole frame. The interface and preview rotate between portrait and landscape, and captures use the interface orientation.
+Choose a physical rear lens using the circular magnification buttons at the bottom of the viewfinder. Tap a subject in the viewfinder to move the autofocus point. Tap-to-focus exits manual focus and tracks at that point. Focus taps and lens changes are disabled during capture. Each lens reports its own Bayer RAW and manual-control capabilities. Use **Exposure** to select Auto, Manual, Shutter priority, or ISO priority, **WB** to set color temperature, and **Focus** to set lens position. The viewfinder shows the whole frame. The interface and preview rotate between portrait and landscape, and captures use the interface orientation.
 
 Tap the shutter for one DNG. Hold it for at least 0.25 seconds for repeated captures using continuous autofocus. Release to stop requesting frames. If manual focus was selected, the app restores its position after outstanding captures finish. A lens without continuous autofocus supports single shots if it provides Bayer RAW.
 
@@ -38,3 +38,11 @@ Use the sliders icon in the navigation bar to choose Off, Rule of Thirds, or Gol
 The compact histogram sits in the top-right corner of the viewfinder. The level shows the horizon relative to the current interface orientation, with a yellow indicator within one degree of level. Motion updates run only while the level is enabled and the app is active. The level shows unavailable when motion data is unavailable or the phone is too flat for a reliable horizon.
 
 Check portrait and both landscape directions, including rotation during a burst. Confirm the preview and saved DNG orientation match, the focus square remains at the selected subject point after rotation, both grids align to the image, and the level reads near zero with a horizontal horizon. Rotation follows the system's orientation behavior.
+
+## Exposure priority
+
+In Shutter priority, choose a shutter speed and the app meters the scene to adjust ISO. In ISO priority, choose ISO and the app meters the scene to adjust shutter speed. The Exposure panel displays the automatically adjusted value and the meter offset. Manual mode fixes both values, and Auto uses the system's continuous automatic exposure.
+
+The iOS 18-compatible priority controller uses the device's exposure target offset. It waits for exposure changes to finish, then meters fresh frames and makes bounded, damped corrections. The automatic value stays within the current lens's supported range. Scenes beyond those limits can retain a nonzero meter offset. Changing lenses keeps the mode and clamps its settings to the new lens's range. Camera Control keeps the pinned parameter adjustable in priority modes.
+
+CI checks the exposure calculations for pinned values, direction, convergence, and device limits. On an iPhone, vary scene brightness in each priority mode and inspect the DNG metadata to confirm the pinned setting stays fixed while the automatic setting changes. Repeat during a burst and after changing lenses.
