@@ -15,34 +15,39 @@ private final class PreviewView: UIView {
     var onFocus: ((CGPoint) -> Void)?
     var focusEnabled = false
     private let focusRing = CALayer()
-    private var hideRing: DispatchWorkItem?
+    private var focusPoint = CGPoint(x: 0.5, y: 0.5)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
         focusRing.borderWidth = 1.5
         focusRing.borderColor = UIColor.systemYellow.cgColor
-        focusRing.isHidden = true
         layer.addSublayer(focusRing)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        positionFocusRing()
+    }
+
+    private func positionFocusRing() {
+        let point = preview.layerPointConverted(fromCaptureDevicePoint: focusPoint)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        focusRing.frame = CGRect(x: point.x - 30, y: point.y - 30, width: 60, height: 60)
+        CATransaction.commit()
+    }
 
     @objc private func tapped(_ gesture: UITapGestureRecognizer) {
         guard focusEnabled else { return }
         let point = gesture.location(in: self)
         let imageRect = preview.layerRectConverted(fromMetadataOutputRect: CGRect(x: 0, y: 0, width: 1, height: 1))
         guard imageRect.contains(point) else { return }
-        onFocus?(preview.captureDevicePointConverted(fromLayerPoint: point))
-        hideRing?.cancel()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        focusRing.frame = CGRect(x: point.x - 30, y: point.y - 30, width: 60, height: 60)
-        focusRing.isHidden = false
-        CATransaction.commit()
-        let work = DispatchWorkItem { [weak self] in self?.focusRing.isHidden = true }
-        hideRing = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+        focusPoint = preview.captureDevicePointConverted(fromLayerPoint: point)
+        onFocus?(focusPoint)
+        positionFocusRing()
     }
 }
 
@@ -61,6 +66,7 @@ private struct Preview: UIViewRepresentable {
         if let connection = view.preview.connection, connection.isVideoRotationAngleSupported(90), connection.videoRotationAngle != 90 {
             connection.videoRotationAngle = 90
         }
+        view.setNeedsLayout()
     }
 }
 
