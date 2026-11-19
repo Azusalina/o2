@@ -13,12 +13,14 @@ struct ExposureValues: Equatable {
     let duration: Double
     let iso: Double
 
-    func meteredAdjustment(mode: ExposureMode, offset: Double, durations: ClosedRange<Double>, isos: ClosedRange<Double>) -> ExposureValues? {
-        guard mode.isPriority, offset.isFinite, abs(offset) > 0.1,
+    func meteredAdjustment(mode: ExposureMode, offset: Double, compensation: Double = 0, durations: ClosedRange<Double>, isos: ClosedRange<Double>) -> ExposureValues? {
+        guard mode.isPriority, offset.isFinite, compensation.isFinite,
               duration.isFinite, duration > 0, iso.isFinite, iso > 0 else { return nil }
+        let error = offset - compensation
+        guard abs(error) > 0.1 else { return nil }
         // Positive meter offsets mean overexposure. Dampen corrections and limit
         // each update to one stop so delayed metering cannot cause large jumps.
-        let factor = exp2(min(1, max(-1, -offset * 0.6)))
+        let factor = exp2(min(1, max(-1, -error * 0.6)))
         switch mode {
         case .shutterPriority:
             let nextISO = min(isos.upperBound, max(isos.lowerBound, iso * factor))

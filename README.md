@@ -46,3 +46,11 @@ In Shutter priority, choose a shutter speed and the app meters the scene to adju
 The iOS 18-compatible priority controller uses the device's exposure target offset. It waits for exposure changes to finish, then meters fresh frames and makes bounded, damped corrections. The automatic value stays within the current lens's supported range. Scenes beyond those limits can retain a nonzero meter offset. Changing lenses keeps the mode and clamps its settings to the new lens's range. Camera Control keeps the pinned parameter adjustable in priority modes.
 
 CI checks the exposure calculations for pinned values, direction, convergence, and device limits. On an iPhone, vary scene brightness in each priority mode and inspect the DNG metadata to confirm the pinned setting stays fixed while the automatic setting changes. Repeat during a burst and after changing lenses.
+
+## Exposure compensation
+
+The Exposure panel provides an EV slider and Reset EV in Auto, Shutter priority, and ISO priority. Positive EV requests a brighter result and negative EV a darker result. Reset EV returns to zero. The selected value follows mode changes and is clamped to the selected lens's supported EV range when changing lenses.
+
+Auto applies the camera device's exposure target bias. Priority modes keep native bias at zero and apply compensation once to the software metering target. Shutter priority adjusts ISO while keeping shutter speed fixed, and ISO priority adjusts shutter speed while keeping ISO fixed. The EV control is also offered through Camera Control when the device has space for another control. The selected EV value is retained while Manual mode is selected and applies when returning to an automatic or priority mode.
+
+CI checks convergence to negative, zero, and positive EV targets while preserving the pinned setting. On an iPhone, compare negative, zero, and positive compensation in all three modes and check DNG metadata for the pinned value in each priority mode.

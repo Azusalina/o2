@@ -463,6 +463,15 @@ private struct Viewfinder: View {
                 Text(String(format: "Meter %+.1f EV", p.exposureOffset))
                     .font(.caption.monospacedDigit())
             }
+            if p.exposureMode != .manual {
+                slider("EV", value: String(format: "%+.1f", p.exposureCompensation),
+                       current: p.exposureCompensation, range: p.compensationRange) {
+                    camera.setExposureCompensation($0)
+                }
+                Button("Reset EV") { camera.setExposureCompensation(0) }
+                    .font(.caption)
+                    .disabled(abs(p.exposureCompensation) < 0.001)
+            }
         case .balance:
             Toggle("Manual white balance", isOn: Binding(get: { p.manualBalance }, set: { camera.control(.balance, manual: $0) }))
                 .disabled(!p.canBalance)

@@ -34,6 +34,28 @@ struct ExposureChecks {
             }
         }
 
+        for mode in [ExposureMode.shutterPriority, .isoPriority] {
+            for compensation in [-1.0, 0.0, 1.0] {
+                for brightness in [0.5, 1.0, 2.0] {
+                    var current = initial
+                    let target = initial.duration * initial.iso
+                    for _ in 0..<30 {
+                        let offset = log2(current.duration * current.iso * brightness / target)
+                        if let next = current.meteredAdjustment(mode: mode, offset: offset, compensation: compensation, durations: durations, isos: isos) {
+                            current = next
+                        }
+                    }
+                    let achieved = log2(current.duration * current.iso * brightness / target)
+                    precondition(abs(achieved - compensation) <= 0.1, "Meter did not reach the compensated target")
+                    precondition(mode == .shutterPriority ? current.duration == initial.duration : current.iso == initial.iso, "Compensation changed pinned value")
+                }
+                precondition(initial.meteredAdjustment(mode: mode, offset: compensation, compensation: compensation, durations: durations, isos: isos) == nil, "Meter changed a settled compensated exposure")
+            }
+            for compensation in [Double.infinity, Double.nan] {
+                precondition(initial.meteredAdjustment(mode: mode, offset: 0, compensation: compensation, durations: durations, isos: isos) == nil)
+            }
+        }
+
         let high = ExposureValues(duration: 0.75, iso: 1200)
         precondition(high.meteredAdjustment(mode: .shutterPriority, offset: -100, durations: durations, isos: isos)?.iso == isos.upperBound)
         precondition(high.meteredAdjustment(mode: .isoPriority, offset: -100, durations: durations, isos: isos)?.duration == durations.upperBound)
@@ -46,6 +68,6 @@ struct ExposureChecks {
         for mode in [ExposureMode.automatic, .manual] {
             precondition(initial.meteredAdjustment(mode: mode, offset: 2, durations: durations, isos: isos) == nil)
         }
-        print("Exposure checks passed: pinned values, correction direction, convergence, limits, and invalid readings.")
+        print("Exposure checks passed: pinned values, correction direction, compensated convergence, limits, and invalid readings.")
     }
 }

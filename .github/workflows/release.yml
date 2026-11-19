@@ -105,7 +105,7 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
           RAW Camera for iPhone running iOS 18 or later.
 
-          Manual, shutter-priority, and ISO-priority exposure, white balance, focus, physical lens selection, tap-to-focus, a compact live preview histogram, rotating interface, composition grids, a level, and Camera Control support.
+          Auto, manual, shutter-priority, and ISO-priority exposure, exposure compensation, white balance, focus, physical lens selection, tap-to-focus, a compact live preview histogram, rotating interface, composition grids, a level, and Camera Control support.
           Hold the shutter for RAW bursts with continuous autofocus and a 30-photo buffer.
 
           Sign the unsigned IPA with your sideloading tool before installing.

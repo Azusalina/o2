@@ -22,6 +22,8 @@ struct Panel {
     var manualFocus = false
     var exposureMode = ExposureMode.automatic
     var exposureOffset = 0.0
+    var exposureCompensation = 0.0
+    var compensationRange = -3.0...3.0
     var manualBalance = false
     var focus = 0.5
     var duration = 1.0 / 125
@@ -55,6 +57,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
     private var balanceControl: AVCaptureSlider?
     private var focusControl: AVCaptureSlider?
     private var lensControl: AVCaptureIndexPicker?
+    private var compensationControl: AVCaptureSlider?
     private var state = Panel()
     private var devices: [AVCaptureDevice] = []
     private var input: AVCaptureDeviceInput?
@@ -212,6 +215,8 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
             let format = device.activeFormat
             state.durations = format.minExposureDuration.seconds...format.maxExposureDuration.seconds
             state.isos = Double(format.minISO)...Double(format.maxISO)
+            state.compensationRange = Double(device.minExposureTargetBias)...Double(device.maxExposureTargetBias)
+            state.exposureCompensation = clamp(state.exposureCompensation, state.compensationRange)
             state.duration = clamp(state.exposureMode == .automatic ? device.exposureDuration.seconds : state.duration, state.durations)
             state.iso = clamp(state.exposureMode == .automatic ? Double(device.iso) : state.iso, state.isos)
             state.focus = Double(device.lensPosition)
@@ -239,6 +244,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         balanceControl = nil
         focusControl = nil
         lensControl = nil
+        compensationControl = nil
         session.setControlsDelegate(self, queue: queue)
 
         if state.lenses.count > 1 {
@@ -297,6 +303,17 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
                 focusControl = focus
             }
         }
+        if state.compensationRange.lowerBound < state.compensationRange.upperBound {
+            let ev = AVCaptureSlider("Exposure compensation", symbolName: "plusminus", in: Float(state.compensationRange.lowerBound)...Float(state.compensationRange.upperBound))
+            ev.localizedValueFormat = "%@ EV"
+            ev.setActionQueue(queue) { [weak self] value in
+                self?.setExposureCompensation(Double(value))
+            }
+            if session.canAddControl(ev) {
+                session.addControl(ev)
+                compensationControl = ev
+            }
+        }
         syncHardwareControls()
     }
 
@@ -309,6 +326,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         isoControl?.value = Float(state.iso)
         balanceControl?.value = Float(state.kelvin)
         focusControl?.value = Float(state.focus)
+        compensationControl?.value = Float(state.exposureCompensation)
         if let index = state.lenses.firstIndex(where: { $0.id == state.lens }) {
             lensControl?.selectedIndex = index
         }
@@ -317,6 +335,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         }
         shutterControl?.isEnabled = active && !interrupted && !state.busy && state.exposureMode != .isoPriority
         isoControl?.isEnabled = active && !interrupted && !state.busy && state.exposureMode != .shutterPriority
+        compensationControl?.isEnabled = active && !interrupted && !state.busy && state.exposureMode != .manual
     }
 
     func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {}
@@ -435,6 +454,23 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         }
     }
 
+    func setExposureCompensation(_ value: Double) {
+        queue.async {
+            guard value.isFinite, !self.state.busy, self.state.exposureMode != .manual,
+                  let device = self.input?.device else { return }
+            let compensation = self.clamp(value, self.state.compensationRange)
+            do {
+                if self.state.exposureMode == .automatic {
+                    try device.lockForConfiguration()
+                    device.setExposureTargetBias(Float(compensation), completionHandler: nil)
+                    device.unlockForConfiguration()
+                }
+                self.state.exposureCompensation = compensation
+            } catch { self.state.message = self.describe(error, operation: "Exposure compensation") }
+            self.publish()
+        }
+    }
+
     private func applyExposure(_ mode: ExposureMode, duration: Double, iso: Double, device: AVCaptureDevice) throws {
         guard mode == .automatic ? device.isExposureModeSupported(.continuousAutoExposure) : state.canExpose else { return }
         try device.lockForConfiguration()
@@ -442,6 +478,12 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         exposureGeneration += 1
         exposurePending = false
         state.exposureMode = mode
+        // Priority metering compares an unbiased meter reading to the requested
+        // EV target. Only full Auto delegates compensation to the camera.
+        let bias = mode == .automatic ? Float(state.exposureCompensation) : 0
+        if abs(device.exposureTargetBias - bias) > 0.001 {
+            device.setExposureTargetBias(bias, completionHandler: nil)
+        }
         if mode == .automatic {
             device.exposureMode = .continuousAutoExposure
             return
@@ -493,7 +535,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, A
         guard mode.isPriority, inFlight.isEmpty, singleRetry == nil, !state.saveFailed,
               DispatchTime.now() >= nextMeterTime else { return }
         let current = ExposureValues(duration: state.duration, iso: state.iso)
-        guard let next = current.meteredAdjustment(mode: mode, offset: state.exposureOffset, durations: state.durations, isos: state.isos) else { return }
+        guard let next = current.meteredAdjustment(mode: mode, offset: state.exposureOffset, compensation: state.exposureCompensation, durations: state.durations, isos: state.isos) else { return }
         do {
             try applyExposure(mode, duration: next.duration, iso: next.iso, device: device)
         } catch {
