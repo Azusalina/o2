@@ -22,3 +22,11 @@ Every push to master builds on macOS and publishes a new unsigned IPA with a uni
 RAW requests are serialized while the burst timer continues polling capture readiness. Continuous autofocus stays enabled throughout a burst. Temporary AVFoundation capture failures back off for 250 ms and allow up to three consecutive retries. Single shots also wait briefly for capture readiness. Errors include their operation, domain, code, and underlying error when available.
 
 Test tap-to-focus on near and far subjects, lens changes, and a held burst while moving between subjects on an iPhone. The CI build validates compilation and packaging. Autofocus behavior and the reported capture failure require on-device verification.
+
+## Histogram and Camera Control
+
+The exposure histogram shows sampled live-preview luminance in 64 bins, with shadows on the left and highlights on the right. It updates about six times per second. Its brightness and clipping reflect the preview rendering, so RAW headroom can differ.
+
+While the app is open with the camera running, Camera Control presses take a single photo and holds start a burst. Cancellation stops capture requests. On supported hardware, a light press opens system controls for physical lens selection, shutter speed, ISO, white balance, and focus, subject to the device's supported controls. Hardware adjustments switch the corresponding setting into manual mode. During bursts, continuous autofocus takes over and adjustment controls are disabled until capture finishes.
+
+Verify the histogram by moving between dark and bright scenes and changing manual exposure. On an iPhone with Camera Control, check press, hold, release, cancellation, light-press adjustments, and switching lenses. Backgrounding the app should stop capture and disable hardware adjustments.

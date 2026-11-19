@@ -36,11 +36,24 @@ struct Panel {
 
 // All capture state and reservations belong to queue. Only the published snapshot
 // and the preview layer are consumed on the main thread.
-final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
+final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureSessionControlsDelegate {
     @Published private(set) var panel = Panel()
+    @Published private(set) var histogram: [Double] = []
+    @Published private(set) var cameraControlFullscreen = false
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "camera.capture", qos: .userInitiated)
     private let output = AVCapturePhotoOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let histogramQueue = DispatchQueue(label: "camera.histogram", qos: .utility)
+    // Accessed only on histogramQueue. No preview pixel buffers are retained.
+    private var histogramUpdatePending = false
+    private var lastHistogramTime = -Double.infinity
+    private var shutterControl: AVCaptureIndexPicker?
+    private var shutterDurations: [Double] = []
+    private var isoControl: AVCaptureSlider?
+    private var balanceControl: AVCaptureSlider?
+    private var focusControl: AVCaptureSlider?
+    private var lensControl: AVCaptureIndexPicker?
     private var state = Panel()
     private var devices: [AVCaptureDevice] = []
     private var input: AVCaptureDeviceInput?
@@ -81,6 +94,7 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
         state.burst = pulse != nil
         state.busy = pressed || !inFlight.isEmpty || singleRetry != nil
         state.ready = active && !interrupted && session.isRunning && rawFormat != nil
+        syncHardwareControls()
         let snapshot = state
         DispatchQueue.main.async { self.panel = snapshot }
     }
@@ -172,6 +186,17 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
                 }
                 session.addOutput(output)
             }
+            if !session.outputs.contains(videoOutput), session.canAddOutput(videoOutput) {
+                videoOutput.alwaysDiscardsLateVideoFrames = true
+                videoOutput.automaticallyConfiguresOutputBufferDimensions = false
+                videoOutput.deliversPreviewSizedOutputBuffers = true
+                videoOutput.setSampleBufferDelegate(self, queue: histogramQueue)
+                session.addOutput(videoOutput)
+            }
+            let formats = videoOutput.availableVideoPixelFormatTypes
+            if let format = [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange].first(where: { formats.contains($0) }) {
+                videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: format]
+            }
             session.commitConfiguration()
             input = next
             state.lens = device.uniqueID
@@ -190,7 +215,141 @@ final class Camera: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
             state.manualBalance = device.whiteBalanceMode == .locked && state.canBalance
             state.manualFocus = device.focusMode == .locked && state.canFocus
             refreshRawFormat()
+            configureHardwareControls()
         } catch { state.message = error.localizedDescription }
+    }
+
+    private func configureHardwareControls() {
+        guard session.supportsControls else { return }
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        for control in session.controls { session.removeControl(control) }
+        shutterControl = nil
+        isoControl = nil
+        balanceControl = nil
+        focusControl = nil
+        lensControl = nil
+        session.setControlsDelegate(self, queue: queue)
+
+        if state.lenses.count > 1 {
+            let lensIDs = state.lenses.map(\.id)
+            let picker = AVCaptureIndexPicker("Lens", symbolName: "camera.aperture", localizedIndexTitles: state.lenses.map(\.magnification))
+            picker.setActionQueue(queue) { [weak self] index in
+                guard lensIDs.indices.contains(index) else { return }
+                self?.select(lensIDs[index])
+            }
+            if session.canAddControl(picker) {
+                session.addControl(picker)
+                lensControl = picker
+            }
+        }
+        if state.canExpose {
+            let stops = [1.0 / 8000, 1.0 / 4000, 1.0 / 2000, 1.0 / 1000, 1.0 / 500, 1.0 / 250, 1.0 / 125, 1.0 / 60, 1.0 / 30, 1.0 / 15, 1.0 / 8, 0.25, 0.5, 1, 2, 4, 8, 15, 30]
+            let durations = Array(Set(stops.filter { state.durations.contains($0) } + [state.durations.lowerBound, state.durations.upperBound])).sorted()
+            shutterDurations = durations
+            let titles = durations.map { $0 < 0.5 ? "1/\(Int((1 / $0).rounded())) s" : String(format: "%g s", $0) }
+            let shutter = AVCaptureIndexPicker("Shutter", symbolName: "shutter.speed", localizedIndexTitles: titles)
+            shutter.setActionQueue(queue) { [weak self] index in
+                guard durations.indices.contains(index) else { return }
+                self?.control(.exposure, manual: true, value: durations[index])
+            }
+            if session.canAddControl(shutter) {
+                session.addControl(shutter)
+                shutterControl = shutter
+            }
+            let iso = AVCaptureSlider("ISO", symbolName: "camera", in: Float(state.isos.lowerBound)...Float(state.isos.upperBound))
+            iso.setActionQueue(queue) { [weak self] value in
+                self?.control(.exposure, manual: true, iso: Double(value))
+            }
+            if session.canAddControl(iso) {
+                session.addControl(iso)
+                isoControl = iso
+            }
+        }
+        if state.canBalance {
+            let balance = AVCaptureSlider("White balance", symbolName: "thermometer.medium", in: 2500...10000, step: 100)
+            balance.localizedValueFormat = "%@ K"
+            balance.setActionQueue(queue) { [weak self] value in
+                self?.control(.balance, manual: true, value: Double(value))
+            }
+            if session.canAddControl(balance) {
+                session.addControl(balance)
+                balanceControl = balance
+            }
+        }
+        if state.canFocus {
+            let focus = AVCaptureSlider("Focus", symbolName: "viewfinder", in: 0...1)
+            focus.setActionQueue(queue) { [weak self] value in
+                self?.control(.focus, manual: true, value: Double(value))
+            }
+            if session.canAddControl(focus) {
+                session.addControl(focus)
+                focusControl = focus
+            }
+        }
+        syncHardwareControls()
+    }
+
+    private func syncHardwareControls() {
+        if let nearest = shutterDurations.indices.min(by: {
+            abs(log2(shutterDurations[$0] / state.duration)) < abs(log2(shutterDurations[$1] / state.duration))
+        }) {
+            shutterControl?.selectedIndex = nearest
+        }
+        isoControl?.value = Float(state.iso)
+        balanceControl?.value = Float(state.kelvin)
+        focusControl?.value = Float(state.focus)
+        if let index = state.lenses.firstIndex(where: { $0.id == state.lens }) {
+            lensControl?.selectedIndex = index
+        }
+        for control in session.controls {
+            control.isEnabled = active && !interrupted && !state.busy
+        }
+    }
+
+    func sessionControlsDidBecomeActive(_ session: AVCaptureSession) {}
+    func sessionControlsDidBecomeInactive(_ session: AVCaptureSession) {
+        DispatchQueue.main.async { self.cameraControlFullscreen = false }
+    }
+    func sessionControlsWillEnterFullscreenAppearance(_ session: AVCaptureSession) {
+        DispatchQueue.main.async { self.cameraControlFullscreen = true }
+    }
+    func sessionControlsWillExitFullscreenAppearance(_ session: AVCaptureSession) {
+        DispatchQueue.main.async { self.cameraControlFullscreen = false }
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+        guard !histogramUpdatePending, timestamp.isFinite,
+              timestamp < lastHistogramTime || timestamp - lastHistogramTime >= 0.15,
+              let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let format = CVPixelBufferGetPixelFormatType(pixels)
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+              CVPixelBufferGetPlaneCount(pixels) > 0,
+              CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess else { return }
+        defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
+        guard let address = CVPixelBufferGetBaseAddressOfPlane(pixels, 0) else { return }
+        let width = CVPixelBufferGetWidthOfPlane(pixels, 0)
+        let height = CVPixelBufferGetHeightOfPlane(pixels, 0)
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixels, 0)
+        let bytes = address.assumingMemoryBound(to: UInt8.self)
+        let limitedRange = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        var bins = [Int](repeating: 0, count: 64)
+        for y in stride(from: 0, to: height, by: max(1, height / 120)) {
+            for x in stride(from: 0, to: width, by: max(1, width / 160)) {
+                let luma = Int(bytes[y * rowBytes + x])
+                let normalized = limitedRange ? min(255, max(0, (luma - 16) * 255 / 219)) : luma
+                bins[normalized / 4] += 1
+            }
+        }
+        let peak = Double(bins.max() ?? 1)
+        let values = bins.map { Double($0) / max(1, peak) }
+        lastHistogramTime = timestamp
+        histogramUpdatePending = true
+        DispatchQueue.main.async {
+            self.histogram = values
+            self.histogramQueue.async { self.histogramUpdatePending = false }
+        }
     }
 
     private func refreshRawFormat() {

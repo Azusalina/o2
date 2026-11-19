@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import SwiftUI
 
 @main
@@ -123,6 +124,41 @@ private struct Shutter: UIViewRepresentable {
 
 private enum Adjustment: String, CaseIterable { case exposure = "Exposure", balance = "WB", focus = "Focus" }
 
+private struct ExposureHistogram: View {
+    let bins: [Double]
+    let live: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(live ? "Exposure · preview" : "Exposure · paused")
+                .font(.caption2)
+            Canvas { context, size in
+                guard !bins.isEmpty else { return }
+                let width = size.width / CGFloat(bins.count)
+                var bars = Path()
+                for (index, value) in bins.enumerated() {
+                    let height = CGFloat(value) * size.height
+                    bars.addRect(CGRect(x: CGFloat(index) * width, y: size.height - height, width: width, height: height))
+                }
+                context.fill(bars, with: .color(.white.opacity(live ? 0.9 : 0.4)))
+            }
+            .frame(width: 144, height: 52)
+            HStack {
+                Text("Shadows")
+                Spacer()
+                Text("Highlights")
+            }
+            .font(.system(size: 9))
+        }
+        .padding(8)
+        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 6))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Exposure histogram, shadows on the left and highlights on the right")
+        .accessibilityValue(live && !bins.isEmpty ? "Live preview" : "Waiting for preview")
+        .allowsHitTesting(false)
+    }
+}
+
 private struct Viewfinder: View {
     @ObservedObject var camera: Camera
     @Environment(\.scenePhase) private var phase
@@ -137,6 +173,7 @@ private struct Viewfinder: View {
                 Spacer()
                 Text("DNG").font(.caption.bold())
             }
+            .opacity(camera.cameraControlFullscreen ? 0 : 1)
             ZStack(alignment: .bottom) {
                 Preview(camera: camera, focusEnabled: p.ready && !p.busy && p.canTapFocus)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -156,27 +193,37 @@ private struct Viewfinder: View {
                     }
                 }
                 .disabled(p.busy)
+                .opacity(camera.cameraControlFullscreen ? 0 : 1)
                 .padding(.bottom, 12)
             }
-            HStack {
-                Text(p.burst ? (p.used == 30 ? "Buffer full · AF-C" : "Burst · AF-C") : "Buffer")
-                Text("\(p.used)/30")
-                Spacer()
-                Text("\(p.saved) saved")
+            .overlay(alignment: .topLeading) {
+                ExposureHistogram(bins: camera.histogram, live: p.ready)
+                    .padding(8)
+                    .opacity(camera.cameraControlFullscreen ? 0 : 1)
             }
-            .font(.caption.monospacedDigit())
-            if !p.message.isEmpty {
-                Text(p.message).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                HStack {
+                    Text(p.burst ? (p.used == 30 ? "Buffer full · AF-C" : "Burst · AF-C") : "Buffer")
+                    Text("\(p.used)/30")
+                    Spacer()
+                    Text("\(p.saved) saved")
+                }
+                .font(.caption.monospacedDigit())
+                if !p.message.isEmpty {
+                    Text(p.message).font(.footnote).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if p.saveFailed { Button("Retry saving", action: camera.retry) }
+                Picker("Adjustment", selection: $tab) {
+                    ForEach(Adjustment.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented)
+                controls
+                    .disabled(!p.ready || p.busy)
+                Shutter(camera: camera, enabled: p.ready && !p.saveFailed, burst: p.burst)
+                    .frame(width: 66, height: 66)
+                Text("Tap for one photo · Hold for burst").font(.caption)
             }
-            if p.saveFailed { Button("Retry saving", action: camera.retry) }
-            Picker("Adjustment", selection: $tab) {
-                ForEach(Adjustment.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.segmented)
-            controls
-                .disabled(!p.ready || p.busy)
-            Shutter(camera: camera, enabled: p.ready && !p.saveFailed, burst: p.burst)
-                .frame(width: 66, height: 66)
-            Text("Tap for one photo · Hold for burst").font(.caption)
+            .opacity(camera.cameraControlFullscreen ? 0 : 1)
+            .allowsHitTesting(!camera.cameraControlFullscreen)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -184,6 +231,14 @@ private struct Viewfinder: View {
         .tint(.orange)
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .onCameraCaptureEvent(isEnabled: p.ready && !p.saveFailed) { event in
+            switch event.phase {
+            case .began: camera.down()
+            case .ended: camera.up()
+            case .cancelled: camera.up(cancel: true)
+            @unknown default: camera.up(cancel: true)
+            }
+        }
         .onAppear {
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             camera.orient(UIDevice.current.orientation)
